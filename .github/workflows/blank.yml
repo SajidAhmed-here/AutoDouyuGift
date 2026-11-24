@@ -1,35 +1,87 @@
-name: check-in
+name: AutoDouyuGift
 
 on:
   workflow_dispatch:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
   schedule:
-    - cron:  0 8 * * * 
+    # Preserve the original daily schedule: 08:00 UTC / 16:00 Beijing.
+    - cron: '0 8 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  check-in:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-    - uses: actions/checkout@v2
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-    - name: Install Python
-      run: |
-        sudo apt update && \
-        sudo apt install python3
-      
-    - name: requirements
-      run: |
-        pip3 install -r requirements.txt
-        
-    - name: Checkin
-      run: |
-        python3 main.py 
-      env: 
-        COOKIE: ${{ secrets.COOKIE }}
-        SCON: ${{ secrets.SCON }}
-        SCKEY: ${{ secrets.SCKEY }}
-        ROOMID: ${{ secrets.ROOMID }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install and check dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+
+      - name: Validate Python and environment compatibility
+        # Importing main does not execute its live gifting entry point.
+        env:
+          COOKIE: 'validation=only'
+          ROOMID: '0'
+          SCON: 'OFF'
+          SCKEY: ''
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -c "import main; print('Python imports and required environment variables verified.')"
+
+      - name: Check live configuration
+        id: configuration
+        if: github.event_name != 'pull_request'
+        env:
+          COOKIE: ${{ secrets.COOKIE }}
+          ROOMID: ${{ secrets.ROOMID }}
+          SCON: ${{ secrets.SCON || 'OFF' }}
+          SCKEY: ${{ secrets.SCKEY }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          missing = [name for name in ('COOKIE', 'ROOMID') if not os.environ[name].strip()]
+          if missing:
+              print('::notice::Live gifting skipped. Configure repository secrets: ' + ', '.join(missing))
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+                  summary.write('Validation passed. Live gifting skipped; missing secrets: ' + ', '.join(missing) + '\n')
+              sys.exit(0)
+          if os.environ['SCON'] not in ('ON', 'OFF'):
+              sys.exit('SCON must be ON or OFF (defaults to OFF).')
+          if os.environ['SCON'] == 'ON' and not os.environ['SCKEY'].strip():
+              sys.exit('SCKEY is required when SCON is ON.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('ready=true\n')
+          PY
+
+      - name: Send gifts
+        if: github.event_name != 'pull_request' && steps.configuration.outputs.ready == 'true'
+        env:
+          COOKIE: ${{ secrets.COOKIE }}
+          ROOMID: ${{ secrets.ROOMID }}
+          SCON: ${{ secrets.SCON || 'OFF' }}
+          SCKEY: ${{ secrets.SCKEY }}
+        run: python main.py
